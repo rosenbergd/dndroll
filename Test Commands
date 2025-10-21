@@ -1,0 +1,5 @@
+./dndroll -v --help --verbose 2x2d6
+./dndroll -ddvv '2x{3x{2d6&5d4}*2+1l1}*3+2l-1h-1'
+./dndroll -ddvv '2x{3x{2d6&5d4}*2+1l1&8d20}*3+2l-1h-1'
+./dndroll -d '9d(custom_die1)'
+./dndroll -vvvvv '2x{5d6*10-3l4&{3d20+30&5d%-20}}*3+15l-1'

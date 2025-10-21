@@ -1,0 +1,600 @@
+#!/bin/bash
+
+# tput used to set commands for different actions within terminal compliant to the current terminal (tput can also be used for clearing, moving the cursor, text colour, getting the terminal size, and more)
+BOLD=$(tput bold)
+NORMAL=$(tput sgr0)
+UNDERLINE=$(tput smul)
+RED=$(tput setaf 1)
+GREEN=$(tput setaf 2)
+YELLOW=$(tput setaf 3)
+
+# the help doc should display when calling this tool with `-h` or `--help`, and this should be accepted and override any other behaviour if found (even if found after another set of options / params)
+# use the heroku format from the below link as a base for the help text format
+# https://clig.dev/#help
+
+###############################################################
+# Settings:                                                   #
+#     -h, --help = help (show the help manual)                #
+#     -v, --verbose = verbose (show the die roll information) #
+#     -d, --debug = debug (show debug information)            #
+###############################################################
+
+# convert long options formats to short before running below
+for (( i=1; i<=$#; i++ ))
+do
+	set -- "${@:1:(i-1)}" "$(echo "${!i}" | sed 's/^--help$/-h/')" "${@:(i+1)}"
+	set -- "${@:1:(i-1)}" "$(echo "${!i}" | sed 's/^--verbose$/-v/')" "${@:(i+1)}"
+	set -- "${@:1:(i-1)}" "$(echo "${!i}" | sed 's/^--debug$/-d/')" "${@:(i+1)}"
+	# format for built in replacement: "${!i/--verbose/-v}" <-- ! is the pointer operator, hence !i. This is unfortunately limited in regex capabilities, so sed was used instead
+	#echo "${!i}"
+done
+
+# the alternative to replacing long form with short form can be found here along other bash to-knows: https://devhints.io/bash (the `Getting options` section shows a case that manually handles opts instead of using getopts)
+#while [[ "$1" =~ ^- && ! "$1" == "--" ]] # not sure why they use `! ... ==` instead of just `!=`, can't find anything showing it would handle differently, try `!=` instead, then see if it behaves differently
+#do
+#	case "$1" in
+#		-V | --version )
+#			echo "$version"
+#			exit
+#			;;
+#		-s | --string )
+#			shift; string="$1"
+#			;;
+#		-f | --flag )
+#			flag=1
+#			;;
+#	esac
+#	shift
+#done
+#if [[ "$1" == '--' ]]; then shift; fi # switch this and the while above to single `[]` instead of double `[[]]` if cross-shell POSIX compliance is desired, but note that less features will be available
+
+# get the settings for this run (settings such as whether or not to show every die roll, etc. the actual die roll is done interactively once the program opens to allow for a continuous flow without having to retype the command)
+# cheatsheet for getopts usage here: https://www.commandinline.com/cheat-sheet/getopts/
+declare -A options
+options[verbosity]=0
+options[debug]=0
+options[help]=0
+
+while getopts "dhv" opt
+do
+	case "$opt" in
+		d)
+			((options[debug]+=1)) # support levels of debug
+			;;
+		v)
+			((options[verbosity]+=1)) # support levels of verbosity
+			;;
+		h)
+			options[help]=1
+			;;
+	esac
+done
+
+# make sure verbosity is equal to debug level
+options[verbosity]="$(( ${options[debug]} > ${options[verbosity]} ? ${options[debug]} : ${options[verbosity]} ))"
+
+# remove all the operands already read
+shift "$(($OPTIND -1))"
+
+# loop through all additional non-opts (positional args)
+#for arg in "$@"
+#do
+#	echo "$arg"
+#done
+
+##############################
+# Start the program handling #
+##############################
+# prints the help manual for this command
+print_help() {
+	echo "Dice roller for DnD, and other purposes. Capable of rolling multiple die, showing the results, and applying modifiers and rules (advantage / disadvantage, etc.)."
+	echo "This works in 2 methods, either interactive by leaving out the ${BOLD}roll_command${NORMAL}, or regular mode if providing the ${BOLD}roll_command${NORMAL}."
+	echo
+	echo "${BOLD}USAGE${NORMAL}"
+	echo "  \$ $0 [options] [roll_command]"
+	echo
+	echo "${BOLD}OPTIONS${NORMAL} ${UNDERLINE}optional${NORMAL}"
+	echo "  -h, --help            show this help manual (if this flag is set, any other flag / request will be ignored)"
+	echo "  -v, --verbose         increase the verbosity (show individual die rolls, etc.)"
+	echo "  -d, --debug           increase the debug level (show debug info including verbose info shown at the same verbosity level)"
+	echo
+	echo "${BOLD}EXAMPLES${NORMAL}"
+	echo "  \$ dndroll -dd 2x2d6   using debug level 2, output the die rolls individually for 2x2d6 roll and exit"
+	echo "  \$ dndroll -v 2x2d6    verbosely output the die rolls individually for 2x2d6 roll and exit"
+	echo "  \$ dndroll --verbose   verbosely output die rolls specified interactively"
+	echo "  \$ dndroll -h          output this help manual and exit"
+	echo "  \$ dndroll 2x2d6       output the results of a 2x2d6 roll and exit"
+	echo "  \$ dndroll             interactively accept die rolls"
+	echo
+	echo "${BOLD}ROLL COMMAND PREFIX FORMAT${NORMAL} ${UNDERLINE}optional${NORMAL}"
+	echo "  2x                    optional, will repeat the roll command 2x and applies after all modifiers and rules (number can go up to 999999)"
+	echo
+	echo "${BOLD}ROLL COMMAND DIE FORMAT${NORMAL}"
+	echo "  4d6                   roll a d6 (6 sided die) 4 times (you can roll up to 999999d999999)"
+	echo "  3d(custom_die)        roll a custom die 3 times (see the section for custom die handling - only allowed latin alphabet (no accents), numbers, and underscore)"
+	echo "  d20                   roll a d20 once (if no number is specified before the die type, 1 is assumed)"
+	echo "  d%                    roll a d100 percent die"
+	echo "  {...&...}             roll multiple sets of roll commands, where each ... is the full roll command (prefix, die, modifier, and all) (the inside of the {} is limited to 255 characters)"
+	echo
+	echo "${BOLD}ROLL COMMAND MULTIPLY MODIFIERS${NORMAL} ${UNDERLINE}optional${NORMAL}"
+	echo "  *3                    multiply the die roll result by this amount (up to 999999)"
+	echo
+	echo "${BOLD}ROLL COMMAND SKILL MODIFIERS${NORMAL} ${UNDERLINE}optional${NORMAL}"
+	echo "  +2                    add 2 to the die roll result (up to 999999)"
+	echo "  -4                    subtract 4 from the die roll result (up to 999999)"
+	echo
+	echo "${BOLD}ROLL COMMAND KEEP / DISCARD FORMAT${NORMAL} ${UNDERLINE}optional${NORMAL}"
+	echo "  l3                    keep the lowest 3 rolls (up to 999999)"
+	echo "  l-3                   discard the lowest 3 rolls (up to 999999)"
+	echo "  h2                    keep the highest 2 rolls (up to 999999)"
+	echo "  h-4                   discard the highest 4 rolls (up to 999999)"
+	echo "  ${UNDERLINE}EXTRA NOTE:${NORMAL} l must be before h when both are specified, but both are optional"
+	echo
+	echo "${BOLD}${UNDERLINE}EXTRA:${NORMAL}${BOLD} CUSTOM DIE HANDLING${NORMAL}"
+	echo "  - custom die name can only contain latin alphabet (without accents), numbers, and an underscore"
+	echo "  - custom die file name should match the name inside the brackets of the roll command die format"
+	echo "  - each line of the file should be a positive or negative integer indicating a side of the die"
+	echo
+	echo "${BOLD}ROLL COMMAND EXAMPLES${NORMAL}"
+	echo "  2d8*12-3              roll 2 d8 die, multiply the result by 12, and subtract by 3"
+	echo "  2d8*2+4h-1            roll 2 d8 die, drop the highest roll, multiply the result by 2, and add 4"
+	echo "  {2xd6&2d4+5h-1}*3     roll a d6 die 2x, roll 2d4, drop the highest of the 2d4, add 5 to the d4 result, multiply the sum of both roll commands (d4 and d6 results) by 3"
+	echo "  d20                   roll a d20"
+	echo "  ${UNDERLINE}EXTRA NOTE:${NORMAL} the only necessary part of the command is the die format part, the other parts are optional, hence the example above with simply d20 being valid"
+}
+
+# conditionally run echo based on parameters
+# $1 = min level
+# $2 = text
+echo_verbose() {
+	if [ "${options[verbosity]}" -ge "$1" ]; then printf "%$((($1-1)*2))s%s\n" "" "${YELLOW}$2${NORMAL}"; fi
+}
+
+# conditionally run echo based on parameters
+# $1 = min level
+# $2 = text
+echo_debug() {
+	if [ "${options[debug]}" -ge "$1" ]; then printf "%$((($1-1)*2))s%s\n" "" "${GREEN}$2${NORMAL}"; fi
+}
+
+# run echo with tabs to emulate the tab levels of the above echo functions
+# $1 = tab level
+# $2 = text
+echo_tab() {
+	max_level="$(( ${options[verbosity]} + 1 ))"
+	tab_level="$(( $1 > $max_level ? $max_level : $1 ))"
+	spaces="$(( ($tab_level - 1) * 2 ))"
+	printf "%${spaces}s%s\n" "" "${RED}$2${NORMAL}"
+}
+
+# split a string by a delimiter, but ignore brackets (for the purpose of die format recursive roll command splitting)
+# $1 = text
+# $2 = delimiter
+# $3 = open bracket type to ignore
+# $4 = close bracket type to ignore
+split_ignore_brackets() {
+	local input="$1"
+	local delimiter="$2"
+	local open_bracket="$3"
+	local close_bracket="$4"
+
+	local bracket_count=0
+	local current=""
+	local result=()
+
+	for (( i=0; i<${#input}; i++ ))
+	do
+		character="${input:$i:1}"
+
+		if [[ "$character" == "$open_bracket" ]]
+		then
+			((bracket_count++))
+		elif [[ "$character" == "$close_bracket" ]]
+		then
+			((bracket_count--))
+		fi
+
+		if [[ "$character" == "$delimiter" && "$bracket_count" -eq 0 ]]
+		then
+			result+=("$current")
+			current=""
+		else
+			current+="$character"
+		fi
+    done
+
+    result+=("$current")  # Add the last segment
+    echo "${result[@]}"
+}
+
+# check if should print the help manual, or run the rest of the command
+if [ "${options[help]}" -eq 1 ]
+then
+	print_help
+	exit
+fi
+
+# remap a range from 1 range to another
+# $1 = the number to remap
+# $2 = the minimum of the original range (`$1`'s minimum value)
+# $3 = the maximum of the original range
+# $4 = the minimum of the new range
+# $5 = the maximum of the new range
+remap_range() {
+	local num="$1"
+	local a_min="$2"
+	local a_max="$3"
+	local b_min="$4"
+	local b_max="$5"
+	# tested multiple distribution functions, this one was recommended, but upon testing it, the distribution wasn't as good as the ones below
+	# floor((num - aMin) * (bMax - bMin + 1)/(aMax - aMin + 1) + bMin);
+	# floor((num - aMin) * (bMax - bMin + 0.99999999999)/(aMax - aMin) + bMin);
+	# round((num - aMin) * (bMax + 0.49999999999999 - bMin + 0.5)/(aMax - aMin) + bMin - 0.5);
+	echo $(echo "scale=0; ($num - $a_min) * ($b_max - $b_min + 0.99999999999999999999)/($a_max - $a_min) + $b_min" | bc -l)
+}
+
+# generate a random number using the method of choice (this function will switch between methods of random generation automatically based on the requested setting)
+# $1 = min
+# $2 = max
+generate_random() {
+	# https://linuxsimply.com/bash-scripting-tutorial/operator/arithmetic-operators/random-number/
+	# shuf
+	# SRANDOM (32 bit as opposed to $RANDOM's 15 bit)
+	# RANDOM ("setting" RANDOM's value seeds it, randomness seems insufficient regardless, `RANDOM=$(date +%N)` shows errors once in a while, using processID and date in millis / micros seems to be a good seed, 15 bit randomness)
+	# /dev/urandom (non-blocking) or /dev/random (blocking, but higher randomness)
+	# 	can use: `od -An -N<random-bytes-count> -tu<bytes-per-number> /dev/urandom` which allows generating multiple at the same time if `random-bytes-count` = `bytes-per-number`
+	local min="$1"
+	local max="$2"
+	
+	# generate random number
+	# 30 bits of entropy to increase the limit for randomness (since 15 bits is insufficient for generating the types of ranges this should be capable of)
+	#random_num="$(( RANDOM + (2**15 - 1) * RANDOM ))"; random_max="$(( 2**30 - 1 ))" # this generates 2x $RANDOM with shifting, so they become a single 30 bit instead of 15 bit random
+	random_num="$(od -An -N4 -tu4 /dev/random)"; random_max="$(( 2**32 - 1 ))" # generate 32 bits / 4 bytes
+
+	echo $(remap_range "$random_num" 0 "$random_max" "$min" "$max")
+}
+
+# the handler for roll commands (uses the global array loop_rolls, where the index of entry is the call counter, so index 0 can be used externally if needed)
+# $1 = roll command
+# $2 = call counter (to make recursive logging only happen for matching levels of verbosity, don't send anything into here, internal-usage only)
+# loop_rolls[0] will contain the skill modifier that should be added to the final total, and loop_rolls[1] will contain the individual rolls
+roll_handler() {
+	# log the roll that is being performed in this function based on call counter
+	if [ -z "$2" ]
+	then
+		set -- "$1" "1"
+		loop_rolls[0]=0
+	fi
+	# reset loop_rolls at the current index to avoid issues with calling this function twice
+	loop_rolls["$2"]=""
+	# log the part of the roll command being rolled
+	echo_verbose "$2" "Rolling: $1"
+	
+	# set up the main regex (associative arrays are local by default)
+	declare -A regexes
+	regexes[main]='^(([1-9][0-9]{,5})x)?(([1-9][0-9]{,5})?d([1-9][0-9]{,5}|%|\([a-zA-Z0-9_]{,30}\))|\{[a-zA-Z0-9_\{\}&\*\+-\%\(\)]{,255}\})(\*[1-9][0-9]{,5})?([+-][1-9][0-9]{,5})?(l-?[1-9][0-9]{,5})?(h-?[1-9][0-9]{,5})?( |$)'
+	regexes[die_format]='^(([1-9][0-9]{,5})?d([1-9][0-9]{,5}|%|\([a-zA-Z0-9_]{,30}\))|\{([a-zA-Z0-9_\{\}&\*\+-\%\(\)]{,255})\})$'
+	
+	# set up an associative array with the groups we're interested in capturing (associative arrays are local by default)
+	declare -A captured
+	
+	# test the main regex, and get the capture groups
+	if [[ "$1" =~ ${regexes[main]} ]]
+	then
+		# "${BASH_REMATCH[1]}" # full prefix															(captured only because ERE doesn't support non-capture groups)
+		captured[prefix]="${BASH_REMATCH[2]}" # prefix without `x`										original capture group 1
+		captured[die_format]="${BASH_REMATCH[3]}" # full die format (`xdy`, `xd(cust)`, and `{..&..}`)	original capture group 2
+		# "${BASH_REMATCH[4]}" # `x` from the full die format (`xdy`)									(captured only because ERE doesn't support non-capture groups)
+		# "${BASH_REMATCH[5]}" # `y` from the full die format (`xdy`)									(captured only because ERE doesn't support non-capture groups)
+		captured[multiply_modifier]="${BASH_REMATCH[6]}" # multiply modifier							original capture group 3
+		captured[skill_modifier]="${BASH_REMATCH[7]}" # skill modifier									original capture group 4
+		captured[lowest_rule]="${BASH_REMATCH[8]}" # keep / discard lowest roll/s						original capture group 5
+		captured[highest_rule]="${BASH_REMATCH[9]}" # keep / discard highest roll/s						original capture group 6
+		
+		# test the die format regex, and get the capture groups, recurse if necessary
+		if [[ "${captured[die_format]}" =~ ${regexes[die_format]} ]]
+		then
+			# "${BASH_REMATCH[1]}" # full die format										(captured only because ERE doesn't support non-capture groups)
+			captured[rolls]="${BASH_REMATCH[2]}" # number of rolls							original capture group 1
+			captured[die]="${BASH_REMATCH[3]}" # die type (custom or regular)				original capture group 2
+			captured[roll_commands]="${BASH_REMATCH[4]}" # recursive group (`{...&...}`)	original capture group 3
+			
+			# log all broken down captured groups
+			for captured_i in "${!captured[@]}"
+			do
+				[ -n "${captured[$captured_i]}" ] && echo_debug "$2" "$captured_i: ${captured[$captured_i]}"
+			done
+			
+			# convert % die to 100
+			if [[ "${captured[die]}" == "%" ]]
+			then
+				captured[die]=100
+			fi
+			
+			# import custom die, figure out the random number range to use, and map to the die's sides specified in the custom file
+			local custom_die=()
+			if [[ "${captured[die]:0:1}" == "(" ]]
+			then
+				# found custom die request
+				# load file matching the name between the `(` and `)`
+				while read -r line; do
+					custom_die+=("$line")
+				done < "${captured[die]:1:-1}"
+				
+				# if the custom die has sides read from the file, set the captured die to the number of sides (this way, mapping can be done by index access)
+				if [ "${#custom_die[@]}" -gt 0 ]
+				then
+					# custom die exists, update captured die to the number of entries
+					captured[die]="${#custom_die[@]}"
+				fi
+
+				# debug log the die sides read from the file
+				echo_debug "$2" "custom die sides: ${custom_die[*]}"
+			fi
+			
+			# break down the roll commands if they exist by the & sign, and call this function recursively for each one
+			if [ -n "${captured[roll_commands]}" ]
+			then
+				# recursive roll command found
+				# split by & sign, then call self per element
+				local split=($(split_ignore_brackets "${captured[roll_commands]}" "&" "{" "}"))
+				#IFS='&' read -ra split <<< "${captured[roll_commands]}"
+				
+				# loop for each of the prefix iterations (a function called from within the loop seems to share variables, and using this local declaration separately from the loop seems to work to avoid this)
+				local prefix_i=1
+				for (( ; prefix_i<="${captured[prefix]:-1}"; prefix_i++ ))
+				do
+					# optionally log the iterations if there are multiple iterations
+					if [[ "${captured[prefix]}" -gt 1 ]]
+					then
+						echo_verbose "$2" "Iteration: ""$prefix_i"
+					fi
+					
+					local rolls=()
+					# roll the sub-parts using this function recursively
+					for part in "${split[@]}"
+					do
+						# pass an array to be nameref'd so the result can be read as an array
+						roll_handler "$part" "$(($2 + 1))"
+						rolls+=(${loop_rolls[$(( $2 + 1 ))]})
+						# reset loop_rolls for the sub-function so that next iteration doesn't accumulate
+						loop_rolls["$(( $2 + 1 ))"]=""
+					done
+					
+					# perform modifiers and rules
+					# apply modifiers (multiplication per element and skill to the final result) - multiplication is applied to the individual rolls to avoid more complex handling due to recursive caller having to potentially drop rolls
+					for roll_i in "${!rolls[@]}"
+					do
+						rolls[roll_i]="$(( ${rolls[roll_i]} ${captured[multiply_modifier]} ))"
+					done
+					# add skill modifier to the total skill modifier (loop_rolls[0])
+					loop_rolls[0]="$(( ${loop_rolls[0]} ${captured[skill_modifier]} ))"
+					
+					echo_verbose "$(( $2 + 1 ))" "Rolls with modifiers: ${rolls[*]}"
+					echo_verbose "$(( $2 + 1 ))" "Sum with modifiers: $(IFS=+; echo "$((${rolls[*]}))")"
+					
+					# drop or keep rolls based on the highest and lowest rules specified
+					if [[ -n "${captured[highest_rule]}" || -n "${captured[lowest_rule]}" ]]
+					then
+						IFS=$'\n'; rolls=($(sort -n <<<"${rolls[*]}"))
+						unset IFS
+						
+						# keep / drop the lowest
+						if [ -n "${captured[lowest_rule]}" ]
+						then
+							# figure out if this is a keep / drop request
+							local start=0
+							local keep=$(( "${captured[lowest_rule]:1}" ))
+							
+							if [ "$keep" -lt 0 ]
+							then
+								keep="$(( ${#rolls[@]} $keep ))"
+								if [ "$keep" -lt 0 ]
+								then
+									keep=0
+								fi
+								start="$(( ${#rolls[@]} - $keep ))"
+							else
+								start=0
+							fi
+							
+							if [ "$start" -ge 0 ]
+							then
+								rolls=("${rolls[@]:$start:$keep}")
+							fi
+						fi
+						
+						# keep / drop the highest
+						if [ -n "${captured[highest_rule]}" ]
+						then
+							# figure out if this is a keep / drop request
+							local start=0
+							local keep=$(( "${captured[highest_rule]:1}" ))
+							
+							if [ "$keep" -lt 0 ]
+							then
+								keep="$(( ${#rolls[@]} $keep ))"
+								if [ "$keep" -lt 0 ]
+								then
+									keep=0
+								fi
+								start=0
+							else
+								start="$(( ${#rolls[@]} - $keep ))"
+							fi
+							
+							if [ "$start" -ge 0 ]
+							then
+								rolls=("${rolls[@]:$start:$keep}")
+							fi
+						fi
+					fi
+					
+					echo_verbose "$(( $2 + 1 ))" "Result rolls: ${rolls[*]}"
+					echo_verbose "$(( $2 + 1 ))" "${RED}Result sum: $(IFS=+; echo "$((${rolls[*]}))")${NORMAL}"
+					if [ -n "${loop_rolls[$2]}" ]; then loop_rolls[$2]+=" "; fi
+					loop_rolls[$2]+="${rolls[*]}"
+				done
+			else
+				# loop for each of the prefix iterations (a function called from within the loop seems to share variables, and using this local declaration separately from the loop seems to work to avoid this)
+				local prefix_i=1
+				for (( ; prefix_i<="${captured[prefix]:-1}"; prefix_i++ ))
+				do
+					# optionally log the iterations if there are multiple iterations
+					if [[ "${captured[prefix]}" -gt 1 ]]
+					then
+						echo_verbose "$2" "Iteration: ""$prefix_i"
+					fi
+					# normal roll command found (this could include custom die, so handle for that too)
+					local rolls=()
+					local roll_i=1
+					for (( ; roll_i<="${captured[rolls]:-1}"; roll_i++ ))
+					do
+						if [ "${#custom_die[@]}" -gt 0 ]
+						then
+							# custom die exists, update to the value at the relevant index of the custom die array
+							rolls+=(${custom_die[$(generate_random 0 "$(( ${captured[die]} - 1 ))")]})
+						else
+							rolls+=($(generate_random 1 "${captured[die]}"))
+						fi
+					done
+					# `${rolls[*]}` = 1 string with spaces (will send all elements as a single argument to a function when using "${rolls[*]}" as opposed to below)
+					# `${rolls[@]}` = each entry as a separate string (even with "${rolls[@]}" passed to a function, each element will be sent as a separate argument)
+					echo_verbose "$(( $2 + 1 ))" "Rolls: ${rolls[*]}"
+					echo_verbose "$(( $2 + 1 ))" "Sum: $(IFS=+; echo "$((${rolls[*]}))")"
+					
+					# perform modifiers and rules
+					# apply modifiers (multiplication per element and skill to the final result) - multiplication is applied to the individual rolls to avoid more complex handling due to recursive caller having to potentially drop rolls
+					for roll_i in "${!rolls[@]}"
+					do
+						rolls[roll_i]="$(( ${rolls[roll_i]} ${captured[multiply_modifier]} ))"
+					done
+					# add skill modifier to the total skill modifier (loop_rolls[0])
+					loop_rolls[0]="$(( ${loop_rolls[0]} ${captured[skill_modifier]} ))"
+					
+					echo_verbose "$(( $2 + 1 ))" "Rolls with modifiers: ${rolls[*]}"
+					echo_verbose "$(( $2 + 1 ))" "Sum with modifiers: $(IFS=+; echo "$((${rolls[*]}))")"
+					
+					# drop or keep rolls based on the highest and lowest rules specified
+					if [[ -n "${captured[highest_rule]}" || -n "${captured[lowest_rule]}" ]]
+					then
+						IFS=$'\n' rolls=($(sort -n <<<"${rolls[*]}"))
+						unset IFS
+						
+						# keep / drop the lowest
+						if [ -n "${captured[lowest_rule]}" ]
+						then
+							# figure out if this is a keep / drop request
+							local start=0
+							local keep=$(( "${captured[lowest_rule]:1}" ))
+							
+							if [ "$keep" -lt 0 ]
+							then
+								keep="$(( ${#rolls[@]} $keep ))"
+								if [ "$keep" -lt 0 ]
+								then
+									keep=0
+								fi
+								start="$(( ${#rolls[@]} - $keep ))"
+							else
+								start=0
+							fi
+							
+							if [ "$start" -ge 0 ]
+							then
+								rolls=("${rolls[@]:$start:$keep}")
+							fi
+						fi
+						
+						# keep / drop the highest
+						if [ -n "${captured[highest_rule]}" ]
+						then
+							# figure out if this is a keep / drop request
+							local start=0
+							local keep=$(( "${captured[highest_rule]:1}" ))
+							
+							if [ "$keep" -lt 0 ]
+							then
+								keep="$(( ${#rolls[@]} $keep ))"
+								if [ "$keep" -lt 0 ]
+								then
+									keep=0
+								fi
+								start=0
+							else
+								start="$(( ${#rolls[@]} - $keep ))"
+							fi
+							
+							if [ "$start" -ge 0 ]
+							then
+								rolls=("${rolls[@]:$start:$keep}")
+							fi
+						fi
+					fi
+					
+					echo_verbose "$(( $2 + 1 ))" "Result rolls: ${rolls[*]}"
+					echo_verbose "$(( $2 + 1 ))" "${RED}Result sum: $(IFS=+; echo "$((${rolls[*]}))")${NORMAL}"
+					if [ -n "${loop_rolls[$2]}" ]; then loop_rolls["$2"]+=" "; fi
+					loop_rolls[$2]+="${rolls[*]}"
+				done
+			fi
+		else
+			# failed to decode the die format
+			echo "Invalid die format in the roll command"
+			
+			# log all broken down captured groups
+			for captured_i in "${!captured[@]}"
+			do
+				[ -n "${captured[$captured_i]}" ] && echo_debug "$2" "$captured_i: ${captured[$captured_i]}"
+			done
+			
+			# return an error code to indicate this didn't go as expected
+			return 1
+		fi
+		
+		# if returning from the function is desired, there are multiple ways to achieve it: https://linuxsimply.com/bash-scripting-tutorial/functions/return-values/return-function-array/
+		# 1. use a global and manage the data there
+		# 2. command substitution (just makes the echo not print, but rather act as a return, but you can split by character as well) (uses `$(...)` notation)
+		# 3. process substitution (similar to command substitution in behaviour) (uses `$(< <(...))` notation)
+		# 4. IFS variable (delimit the returned data using IFS=' ' or similar followed by 2x command substitution saves to variables, 1 from the function, 1 from the return (which then uses IFS character to split), then you can just echo the array with the `${array[@]}` notation)
+		## 5. nameref (probably the best method in terms of capabilities, it behaves kind of like a C function call with the parameter variable being updated from within the function `local -n my_local_var=$1`, it's different in that you can set `my_local_var=...` and `$1`'s backing variable is updated too)
+		# 6. Here-document (ew format, for returning arrays, but it works)
+		# 7. printf (similar to 2 and 3, just uses printf instead of echo which allows logging the array without explicitly looping)
+		
+		return 0
+	else
+		# failed to decode the roll command
+		echo "Invalid roll command"
+		
+		# return an error code to indicate this didn't go as expected
+		return 1
+	fi
+}
+
+# check if running in interactive mode or normal mode (whether or not there are more arguments in the $@ array)
+if [ "$#" -ge 1 ]
+then
+	# run in normal mode (loop through the arguments, and pass them to the roll handler)
+	echo_verbose 1 "Running in normal mode (roll commands provided in the command)"
+	for arg in "$@"
+	do
+		loop_rolls=()
+		roll_handler "$arg"
+		echo
+		echo_verbose "1" "Result rolls: ${loop_rolls[1]}"
+		echo_verbose "1" "  Skill modifier: ${loop_rolls[0]}"
+		echo_tab "1" "Result sum: $(IFS=+; echo "$(( ${loop_rolls[1]// /+} + ${loop_rolls[0]} ))")"
+	done
+else
+	# run in interactive mode (loop infinitely until ctrl+c, and pass interactive inputs to roll handler)
+	echo_verbose 1 "Running in interactive mode (no roll command provided in the command)"
+	while read -rp "> " rollCommand
+	do
+		loop_rolls=()
+		roll_handler "$rollCommand"
+		echo
+		echo_verbose "1" "Result rolls: ${loop_rolls[1]}"
+		echo_verbose "1" "  Skill modifier: ${loop_rolls[0]}"
+		echo_tab "1" "Result sum: $(IFS=+; echo "$(( ${loop_rolls[1]// /+} + ${loop_rolls[0]} ))")"
+	done
+fi
